@@ -1,0 +1,101 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Get version from tag
+        id: get_version
+        run: |
+          $version = $env:GITHUB_REF -replace 'refs/tags/', ''
+          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+          echo "Version: $version"
+        shell: pwsh
+        
+      - name: Check if executable exists
+        id: check_exe
+        run: |
+          if (Test-Path "GetItManager.exe") {
+            echo "EXE_EXISTS=true" >> $env:GITHUB_OUTPUT
+            $hash = (Get-FileHash GetItManager.exe -Algorithm SHA256).Hash
+            echo "SHA256=$hash" >> $env:GITHUB_OUTPUT
+            $size = (Get-Item GetItManager.exe).Length
+            echo "SIZE=$size" >> $env:GITHUB_OUTPUT
+            echo "Executable found"
+            echo "SHA256: $hash"
+            echo "Size: $size bytes"
+          } else {
+            echo "EXE_EXISTS=false" >> $env:GITHUB_OUTPUT
+            echo "Executable not found - will need manual upload"
+          }
+        shell: pwsh
+        
+      - name: Create Release Notes
+        id: release_notes
+        run: |
+          $version = "${{ steps.get_version.outputs.VERSION }}"
+          $releaseNotesFile = "RELEASE_NOTES_$version.md"
+          
+          if (Test-Path $releaseNotesFile) {
+            echo "Using release notes from $releaseNotesFile"
+            echo "NOTES_FILE=$releaseNotesFile" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "Release notes file not found: $releaseNotesFile"
+            echo "NOTES_FILE=" >> $env:GITHUB_OUTPUT
+          }
+        shell: pwsh
+        
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: GetIt Manager ${{ steps.get_version.outputs.VERSION }}
+          body_path: ${{ steps.release_notes.outputs.NOTES_FILE }}
+          draft: false
+          prerelease: false
+          
+      - name: Upload Release Asset
+        if: steps.check_exe.outputs.EXE_EXISTS == 'true'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./GetItManager.exe
+          asset_name: GetItManager.exe
+          asset_content_type: application/octet-stream
+          
+      - name: Add SHA256 to Release
+        if: steps.check_exe.outputs.EXE_EXISTS == 'true'
+        run: |
+          $version = "${{ steps.get_version.outputs.VERSION }}"
+          $sha256 = "${{ steps.check_exe.outputs.SHA256 }}"
+          $size = "${{ steps.check_exe.outputs.SIZE }}"
+          
+          echo "## Verification" > verification.md
+          echo "" >> verification.md
+          echo "**SHA256**: \`$sha256\`" >> verification.md
+          echo "" >> verification.md
+          echo "**File Size**: $size bytes" >> verification.md
+          echo "" >> verification.md
+          echo "Verify with PowerShell:" >> verification.md
+          echo "\`\`\`powershell" >> verification.md
+          echo "Get-FileHash GetItManager.exe -Algorithm SHA256" >> verification.md
+          echo "\`\`\`" >> verification.md
+          
+          cat verification.md
+        shell: pwsh
+
