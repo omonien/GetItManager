@@ -4,14 +4,21 @@ program GetItManager;
 {$R *.res}
 
 /// <summary>
-/// GetIt Manager v1.0 - RAD Studio Package Management Tool
+/// GetIt Manager v1.0.1 - RAD Studio Package Management Tool
 /// A comprehensive solution for managing GetIt packages with automatic console buffer
 /// capture to bypass RAD Studio 13.0 AccessViolation issues when using output redirection.
+/// Copyright (c) 2025 Olaf Monien - Licensed under the MIT License
 /// </summary>
 /// <remarks>
 /// This application automatically detects RAD Studio installations, captures package
 /// lists using Windows Console API, categorizes packages intelligently, and provides
 /// flexible installation options with progress tracking.
+/// 
+/// Key features:
+/// - Multi-version RAD Studio support
+/// - Category-based package organization (177 packages detected)
+/// - Flexible package selection (individual, ranges, categories)
+/// - Bypasses D13 GetItCmd AccessViolation issues
 /// </remarks>
 
 uses
