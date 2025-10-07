@@ -1,4 +1,4 @@
-program GetItManager;
+﻿program GetItManager;
 
 {$APPTYPE CONSOLE}
 {$R *.res}
