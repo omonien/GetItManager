@@ -29,7 +29,8 @@ uses
   System.IOUtils,
   System.RegularExpressions,
   System.Math,
-  Winapi.Windows;
+  Winapi.Windows,
+  System.Win.Registry;
 
 {$REGION 'Type Declarations'}
 type
@@ -403,21 +404,67 @@ begin
   end;
 end;
 
+/// <summary>Normalizes BDS RootDir registry value to the Studio x.x installation folder.</summary>
+function NormalizeBdsRootDir(const ARootDir: string): string;
+var
+  L: string;
+begin
+  Result := '';
+  L := Trim(ARootDir);
+  if L = '' then
+    Exit;
+  L := ExcludeTrailingPathDelimiter(L);
+  if SameText(TPath.GetFileName(L), 'bin') then
+    L := ExcludeTrailingPathDelimiter(TPath.GetDirectoryName(L));
+  Result := L;
+end;
+
+procedure TryAddDelphiInstallation(const AStudioDir, AVersionKey: string;
+  const AVersionMap: TDictionary<string, string>;
+  const ASeenGetIt: TDictionary<string, Boolean>;
+  AResult: TDelphiVersionList);
+var
+  RsvarsPath, GetItPath, SeenKey: string;
+  DelphiVersion: TDelphiVersion;
+begin
+  if AStudioDir = '' then
+    Exit;
+  GetItPath := TPath.Combine(AStudioDir, 'bin\GetItCmd.exe');
+  RsvarsPath := TPath.Combine(AStudioDir, 'bin\rsvars.bat');
+  if not (TFile.Exists(GetItPath) and TFile.Exists(RsvarsPath)) then
+    Exit;
+  SeenKey := LowerCase(GetItPath);
+  if ASeenGetIt.ContainsKey(SeenKey) then
+    Exit;
+  ASeenGetIt.Add(SeenKey, True);
+
+  DelphiVersion.Version := AVersionKey;
+  DelphiVersion.Path := AStudioDir;
+  DelphiVersion.GetItCmd := GetItPath;
+  if AVersionMap.ContainsKey(DelphiVersion.Version) then
+    DelphiVersion.Name := AVersionMap[DelphiVersion.Version]
+  else
+    DelphiVersion.Name := 'RAD Studio ' + DelphiVersion.Version;
+  AResult.Add(DelphiVersion);
+end;
+
 function DetectDelphiVersions: TDelphiVersionList;
 var
   StudioRoot: string;
   Directories: TArray<string>;
   Dir: string;
-  RsvarsPath, GetItPath: string;
-  DelphiVersion: TDelphiVersion;
   VersionMap: TDictionary<string, string>;
+  SeenGetIt: TDictionary<string, Boolean>;
+  Reg: TRegistry;
+  SubKeyNames: TStringList;
+  K: Integer;
+  RootDir, StudioDir: string;
 begin
   Result := TDelphiVersionList.Create;
   VersionMap := TDictionary<string, string>.Create;
-  
+  SeenGetIt := TDictionary<string, Boolean>.Create;
+
   try
-    // Map directory/registry version to friendly names (based on authoritative GitHub repo)
-    // These map to the actual directory names in C:\Program Files (x86)\Embarcadero\Studio\xx.x
     VersionMap.Add('37.0', 'RAD Studio 13.0 Florence');
     VersionMap.Add('23.0', 'RAD Studio 12.3 Athens');
     VersionMap.Add('22.0', 'RAD Studio 11.3 Alexandria');
@@ -426,34 +473,50 @@ begin
     VersionMap.Add('19.0', 'RAD Studio 10.2 Tokyo');
     VersionMap.Add('18.0', 'RAD Studio 10.1 Berlin');
     VersionMap.Add('17.0', 'RAD Studio 10.0 Seattle');
-    
+
+    // 1) HKCU\Software\Embarcadero\BDS\<version>\RootDir (custom install roots, e.g. M:\Delphi)
+    SubKeyNames := TStringList.Create;
+    Reg := TRegistry.Create;
+    try
+      Reg.RootKey := HKEY_CURRENT_USER;
+      if Reg.OpenKeyReadOnly('Software\Embarcadero\BDS') then
+      begin
+        Reg.GetKeyNames(SubKeyNames);
+        Reg.CloseKey;
+        for K := 0 to SubKeyNames.Count - 1 do
+        begin
+          SubKeyNames[K] := Trim(SubKeyNames[K]);
+          if SubKeyNames[K] = '' then
+            Continue;
+          if Reg.OpenKeyReadOnly('Software\Embarcadero\BDS\' + SubKeyNames[K]) then
+          try
+            RootDir := Reg.ReadString('RootDir');
+            StudioDir := NormalizeBdsRootDir(RootDir);
+            TryAddDelphiInstallation(StudioDir, SubKeyNames[K], VersionMap, SeenGetIt, Result);
+          finally
+            Reg.CloseKey;
+          end;
+        end;
+      end;
+    finally
+      Reg.Free;
+      SubKeyNames.Free;
+    end;
+
+    // 2) Default Program Files (x86) Embarcadero\Studio\x.x tree
     StudioRoot := 'C:\Program Files (x86)\Embarcadero\Studio';
-    
     if TDirectory.Exists(StudioRoot) then
     begin
       Directories := TDirectory.GetDirectories(StudioRoot);
       for Dir in Directories do
       begin
-        RsvarsPath := TPath.Combine(Dir, 'bin\rsvars.bat');
-        GetItPath := TPath.Combine(Dir, 'bin\GetItCmd.exe');
-        
-        if TFile.Exists(RsvarsPath) and TFile.Exists(GetItPath) then
-        begin
-          DelphiVersion.Version := ExtractFileName(Dir);
-          DelphiVersion.Path := Dir;
-          DelphiVersion.GetItCmd := GetItPath;
-          
-          if VersionMap.ContainsKey(DelphiVersion.Version) then
-            DelphiVersion.Name := VersionMap[DelphiVersion.Version]
-          else
-            DelphiVersion.Name := 'RAD Studio ' + DelphiVersion.Version;
-            
-          Result.Add(DelphiVersion);
-        end;
+        StudioDir := ExcludeTrailingPathDelimiter(Dir);
+        TryAddDelphiInstallation(StudioDir, ExtractFileName(Dir), VersionMap, SeenGetIt, Result);
       end;
     end;
-    
+
   finally
+    SeenGetIt.Free;
     VersionMap.Free;
   end;
   
@@ -466,6 +529,38 @@ begin
         Result[I] := Result[J];
         Result[J] := Temp;
       end;
+end;
+
+/// <summary>Command line to list the full GetIt catalog; older GetIt 6.x needs -listavailable.</summary>
+function GetItListCatalogParams(const ABdsVersion: string): string;
+begin
+  if (ABdsVersion <> '') and (CompareStr(ABdsVersion, '20.0') < 0) then
+    Result := '-listavailable: -filter:All -verb:Normal'
+  else
+    Result := '-l="" -f=all -v=normal';
+end;
+
+function OutputAppearsToBeUsageOnly(const AOutput: TStringList): Boolean;
+var
+  I: Integer;
+  Line: string;
+  HasUsage, HasTableHeader: Boolean;
+begin
+  Result := False;
+  if not Assigned(AOutput) or (AOutput.Count = 0) then
+    Exit;
+  HasUsage := False;
+  HasTableHeader := False;
+  for I := 0 to AOutput.Count - 1 do
+  begin
+    Line := AOutput[I];
+    if ContainsText(Line, 'Usage:') and (ContainsText(Line, 'GetItCmd') or ContainsText(Line, 'GetIt')) then
+      HasUsage := True;
+    if ContainsText(Line, 'Id') and ContainsText(Line, 'Version') and
+      (ContainsText(Line, 'Description') or ContainsText(Line, 'Title')) then
+      HasTableHeader := True;
+  end;
+  Result := HasUsage and not HasTableHeader;
 end;
 
 function SelectDelphiVersion(const Versions: TDelphiVersionList): Integer;
@@ -575,8 +670,9 @@ begin
       
       if Line = '' then Continue;
         
-      // Detect package list boundaries
-      if ContainsText(Line, 'Id') and ContainsText(Line, 'Version') and ContainsText(Line, 'Description') then
+      // Detect package list boundaries (newer and older GetIt column headers)
+      if ContainsText(Line, 'Id') and ContainsText(Line, 'Version') and
+        (ContainsText(Line, 'Description') or ContainsText(Line, 'Title')) then
       begin
         InPackageList := True;
         Continue;
@@ -607,7 +703,9 @@ begin
         Break;
         
       // Skip header/footer lines and empty lines filled with spaces
-      if ContainsText(Line, 'GetIt Package Manager') or 
+      if ContainsText(Line, 'GetIt Package Manager') or
+         ContainsText(Line, 'Usage:') or
+         ContainsText(Line, 'Options:') or
          ContainsText(Line, 'Copyright') or
          ContainsText(Line, 'All Rights Reserved') or
          ContainsText(Line, 'Successfully captured') or
@@ -1091,9 +1189,18 @@ begin
       Writeln('Capturing GetIt catalog using enhanced console buffer management...');
       
       try
-        Output := CaptureGetItOutputEnhanced(CurrentVersion.GetItCmd, '-l="" -f=all -v=normal');
-        
-        if Output.Count > 10 then
+        var ListParams := GetItListCatalogParams(CurrentVersion.Version);
+        Writeln(Format('Using GetIt list parameters for BDS %s: %s', [CurrentVersion.Version, ListParams]));
+        Output := CaptureGetItOutputEnhanced(CurrentVersion.GetItCmd, ListParams);
+
+        if OutputAppearsToBeUsageOnly(Output) then
+        begin
+          Writeln('');
+          Writeln('ERROR: GetItCmd returned usage / help text instead of a package catalog.');
+          Writeln('The command-line switches may not match this GetIt version — check Embarcadero documentation.');
+          Writeln('You can run GetItCmd manually from: ' + CurrentVersion.GetItCmd);
+        end
+        else if Output.Count > 10 then
         begin
           Writeln(Format('Successfully captured %d lines from enhanced console buffer!', [Output.Count]));
           
@@ -1157,6 +1264,7 @@ begin
             begin
               Writeln('Console buffer captured but no packages found in parsed output.');
               Writeln('Falling back to manual selection...');
+              Packages.Free;
             end;
           end
           else
