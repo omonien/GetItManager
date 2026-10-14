@@ -448,6 +448,48 @@ begin
   AResult.Add(DelphiVersion);
 end;
 
+/// <summary>Adds installations found via Software\Embarcadero\BDS\<version>\RootDir
+/// under the given registry root and access view.</summary>
+procedure ScanBdsRegistry(ARootKey: HKEY; AAccess: LongWord;
+  const AVersionMap: TDictionary<string, string>;
+  const ASeenGetIt: TDictionary<string, Boolean>;
+  AResult: TDelphiVersionList);
+const
+  BDS_KEY = 'Software\Embarcadero\BDS';
+var
+  Reg: TRegistry;
+  SubKeyNames: TStringList;
+  KeyName, StudioDir: string;
+begin
+  SubKeyNames := TStringList.Create;
+  Reg := TRegistry.Create(AAccess);
+  try
+    Reg.RootKey := ARootKey;
+    if not Reg.OpenKeyReadOnly(BDS_KEY) then
+      Exit;
+    Reg.GetKeyNames(SubKeyNames);
+    Reg.CloseKey;
+    for KeyName in SubKeyNames do
+    begin
+      if Trim(KeyName) = '' then
+        Continue;
+      if Reg.OpenKeyReadOnly(BDS_KEY + '\' + KeyName) then
+      try
+        if Reg.ValueExists('RootDir') then
+        begin
+          StudioDir := NormalizeBdsRootDir(Reg.ReadString('RootDir'));
+          TryAddDelphiInstallation(StudioDir, Trim(KeyName), AVersionMap, ASeenGetIt, AResult);
+        end;
+      finally
+        Reg.CloseKey;
+      end;
+    end;
+  finally
+    Reg.Free;
+    SubKeyNames.Free;
+  end;
+end;
+
 function DetectDelphiVersions: TDelphiVersionList;
 var
   StudioRoot: string;
@@ -455,10 +497,7 @@ var
   Dir: string;
   VersionMap: TDictionary<string, string>;
   SeenGetIt: TDictionary<string, Boolean>;
-  Reg: TRegistry;
-  SubKeyNames: TStringList;
-  K: Integer;
-  RootDir, StudioDir: string;
+  StudioDir: string;
 begin
   Result := TDelphiVersionList.Create;
   VersionMap := TDictionary<string, string>.Create;
@@ -474,36 +513,14 @@ begin
     VersionMap.Add('18.0', 'RAD Studio 10.1 Berlin');
     VersionMap.Add('17.0', 'RAD Studio 10.0 Seattle');
 
-    // 1) HKCU\Software\Embarcadero\BDS\<version>\RootDir (custom install roots, e.g. M:\Delphi)
-    SubKeyNames := TStringList.Create;
-    Reg := TRegistry.Create;
-    try
-      Reg.RootKey := HKEY_CURRENT_USER;
-      if Reg.OpenKeyReadOnly('Software\Embarcadero\BDS') then
-      begin
-        Reg.GetKeyNames(SubKeyNames);
-        Reg.CloseKey;
-        for K := 0 to SubKeyNames.Count - 1 do
-        begin
-          SubKeyNames[K] := Trim(SubKeyNames[K]);
-          if SubKeyNames[K] = '' then
-            Continue;
-          if Reg.OpenKeyReadOnly('Software\Embarcadero\BDS\' + SubKeyNames[K]) then
-          try
-            RootDir := Reg.ReadString('RootDir');
-            StudioDir := NormalizeBdsRootDir(RootDir);
-            TryAddDelphiInstallation(StudioDir, SubKeyNames[K], VersionMap, SeenGetIt, Result);
-          finally
-            Reg.CloseKey;
-          end;
-        end;
-      end;
-    finally
-      Reg.Free;
-      SubKeyNames.Free;
-    end;
+    // 1) BDS RootDir from the registry (custom install roots, e.g. M:\Delphi).
+    //    HKCU first, then HKLM: 32-bit view (WOW6432Node, where the IDE keys
+    //    normally live) and the native 64-bit view as a fallback.
+    ScanBdsRegistry(HKEY_CURRENT_USER, KEY_READ, VersionMap, SeenGetIt, Result);
+    ScanBdsRegistry(HKEY_LOCAL_MACHINE, KEY_READ or KEY_WOW64_32KEY, VersionMap, SeenGetIt, Result);
+    ScanBdsRegistry(HKEY_LOCAL_MACHINE, KEY_READ or KEY_WOW64_64KEY, VersionMap, SeenGetIt, Result);
 
-    // 2) Default Program Files (x86) Embarcadero\Studio\x.x tree
+    // 2) Fallback: default Program Files (x86) Embarcadero\Studio\x.x tree
     StudioRoot := 'C:\Program Files (x86)\Embarcadero\Studio';
     if TDirectory.Exists(StudioRoot) then
     begin
